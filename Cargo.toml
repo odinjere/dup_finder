@@ -1,0 +1,15 @@
+[package]
+name = "dup_finder"
+version = "0.1.0"
+edition = "2021"
+
+[[bin]]
+name = "dup_finder"
+path = "src/main.rs"
+
+[dependencies]
+sha2 = "0.10"
+
+[profile.release]
+opt-level = 3
+strip = true

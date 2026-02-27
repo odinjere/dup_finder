@@ -1,0 +1,405 @@
+This file is a merged representation of the entire codebase, combined into a single document by Repomix.
+
+<file_summary>
+This section contains a summary of this file.
+
+<purpose>
+This file contains a packed representation of the entire repository's contents.
+It is designed to be easily consumable by AI systems for analysis, code review,
+or other automated processes.
+</purpose>
+
+<file_format>
+The content is organized as follows:
+1. This summary section
+2. Repository information
+3. Directory structure
+4. Repository files (if enabled)
+5. Multiple file entries, each consisting of:
+  - File path as an attribute
+  - Full contents of the file
+</file_format>
+
+<usage_guidelines>
+- This file should be treated as read-only. Any changes should be made to the
+  original repository files, not this packed version.
+- When processing this file, use the file path to distinguish
+  between different files in the repository.
+- Be aware that this file may contain sensitive information. Handle it with
+  the same level of security as you would the original repository.
+</usage_guidelines>
+
+<notes>
+- Some files may have been excluded based on .gitignore rules and Repomix's configuration
+- Binary files are not included in this packed representation. Please refer to the Repository Structure section for a complete list of file paths, including binary files
+- Files matching patterns in .gitignore are excluded
+- Files matching default ignore patterns are excluded
+- Files are sorted by Git change count (files with more changes are at the bottom)
+</notes>
+
+</file_summary>
+
+<directory_structure>
+src/
+  main.rs
+.gitignore
+Cargo.toml
+</directory_structure>
+
+<files>
+This section contains the contents of the repository's files.
+
+<file path="src/main.rs">
+use std::collections::HashMap;
+use std::fs::{self, File};
+use std::io::{self, BufReader, Read};
+use std::path::{Path, PathBuf};
+use std::time::Instant;
+use std::io::Write;
+
+use sha2::{Digest, Sha256};
+
+fn hash_file(path: &Path) -> io::Result<String> {
+    let file = File::open(path)?;
+    let mut reader = BufReader::with_capacity(65536, file);
+    let mut hasher = Sha256::new();
+    let mut buffer = [0u8; 65536];
+
+    loop {
+        let n = reader.read(&mut buffer)?;
+        if n == 0 {
+            break;
+        }
+        hasher.update(&buffer[..n]);
+    }
+
+    Ok(format!("{:x}", hasher.finalize()))
+}
+
+fn walk_dir(dir: &Path, files: &mut Vec<PathBuf>) {
+    let entries = match fs::read_dir(dir) {
+        Ok(e) => e,
+        Err(e) => {
+            eprintln!("Sin acceso a {}: {}", dir.display(), e);
+            return;
+        }
+    };
+
+    for entry in entries {
+        let entry = match entry {
+            Ok(e) => e,
+            Err(e) => {
+                eprintln!("Error al leer entrada: {}", e);
+                continue;
+            }
+        };
+
+        let path = entry.path();
+
+        // Ignorar symlinks para evitar ciclos infinitos.
+        if path.is_symlink() {
+            continue;
+        }
+
+        if path.is_dir() {
+            walk_dir(&path, files);
+        } else if path.is_file() {
+            files.push(path);
+        }
+    }
+}
+
+fn format_size(bytes: u64) -> String {
+    const KB: u64 = 1024;
+    const MB: u64 = KB * 1024;
+    const GB: u64 = MB * 1024;
+
+    if bytes >= GB {
+        format!("{:.2} GB", bytes as f64 / GB as f64)
+    } else if bytes >= MB {
+        format!("{:.2} MB", bytes as f64 / MB as f64)
+    } else if bytes >= KB {
+        format!("{:.2} KB", bytes as f64 / KB as f64)
+    } else {
+        format!("{} bytes", bytes)
+    }
+}
+
+fn interactive_cleanup(output_path: &Path) {
+    use std::io::{BufRead, Write};
+
+    let content = match fs::read_to_string(output_path) {
+        Ok(c) => c,
+        Err(e) => {
+            eprintln!("No se puede leer {}: {}", output_path.display(), e);
+            return;
+        }
+    };
+
+    // Parsear grupos del archivo: buscar lineas que empiecen con "    /"
+    // y agruparlas segun el encabezado [hash...] que las precede.
+    let mut groups: Vec<(String, Vec<PathBuf>)> = Vec::new();
+    let mut current_header = String::new();
+    let mut current_paths: Vec<PathBuf> = Vec::new();
+
+    for line in content.lines() {
+        if line.starts_with('[') {
+            if !current_paths.is_empty() {
+                groups.push((current_header.clone(), current_paths.clone()));
+                current_paths.clear();
+            }
+            current_header = line.to_string();
+        } else if line.starts_with("    ") {
+            let trimmed = line.trim();
+            if !trimmed.is_empty() {
+                current_paths.push(PathBuf::from(trimmed));
+            }
+        }
+    }
+    if !current_paths.is_empty() {
+        groups.push((current_header, current_paths));
+    }
+
+    if groups.is_empty() {
+        println!("No hay grupos de duplicados en el archivo.");
+        return;
+    }
+
+    let stdin = std::io::stdin();
+    let stdout = std::io::stdout();
+
+    'groups: for (header, paths) in &groups {
+        loop {
+            println!("\n{}", header);
+            for (i, p) in paths.iter().enumerate() {
+                println!("  [{}] {}", i + 1, p.display());
+            }
+            println!("  [0] No hacer nada con este grupo");
+            print!("Conservar cual? (0-{}): ", paths.len());
+            stdout.lock().flush().unwrap();
+
+            let mut input = String::new();
+            stdin.lock().read_line(&mut input).unwrap();
+            let input = input.trim();
+
+            match input.parse::<usize>() {
+                Ok(0) => {
+                    println!("Grupo omitido.");
+                    continue 'groups;
+                }
+                Ok(n) if n <= paths.len() => {
+                    let to_keep = &paths[n - 1];
+                    let to_delete: Vec<&PathBuf> = paths
+                        .iter()
+                        .enumerate()
+                        .filter(|(i, _)| *i != n - 1)
+                        .map(|(_, p)| p)
+                        .collect();
+
+                    println!("Conservando: {}", to_keep.display());
+                    for p in &to_delete {
+                        match fs::remove_file(p) {
+                            Ok(_) => println!("Eliminado: {}", p.display()),
+                            Err(e) => eprintln!("Error al eliminar {}: {}", p.display(), e),
+                        }
+                    }
+                    continue 'groups;
+                }
+                _ => {
+                    println!("Opcion invalida, ingresa un numero entre 0 y {}.", paths.len());
+                    // vuelve a mostrar el mismo grupo
+                }
+            }
+        }
+    }
+
+    println!("\nListo.");
+}
+
+fn main() {
+    let start = Instant::now();
+
+    let root = std::env::current_dir().expect("No se puede obtener el directorio actual");
+    println!("Directorio base: {}", root.display());
+    println!("Escaneando...\n");
+
+    let min_bytes: u64 = std::env::args()
+    .nth(1)
+    .and_then(|arg| arg.parse::<u64>().ok())
+    .map(|mb| mb * 1024 * 1024)
+    .unwrap_or(0);
+
+    if min_bytes > 0 {
+        println!("Ignorando archivos menores a {} MB\n", min_bytes / 1024 / 1024);
+    }
+
+    let folder_name = root
+    .file_name()
+    .and_then(|n| n.to_str())
+    .unwrap_or("raiz");
+
+    let output_filename = format!("duplicados_bajo_raiz_{}.txt", folder_name);
+    let output_path = root.join(&output_filename);
+
+    let mut all_files: Vec<PathBuf> = Vec::new();
+    walk_dir(&root, &mut all_files);
+    println!("Archivos encontrados: {}", all_files.len());
+
+    // Primera pasada: agrupar por tamano.
+    // Archivos con tamano unico no pueden ser duplicados; se descartan sin hashear.
+    let mut by_size: HashMap<u64, Vec<PathBuf>> = HashMap::new();
+    for path in all_files {
+        match fs::metadata(&path) {
+            Ok(meta) => {
+                // Ignorar archivos vacios: tecnicamente todos son "iguales"
+                // pero reportarlos no tiene utilidad practica.
+                if meta.len() > min_bytes {
+                    by_size.entry(meta.len()).or_default().push(path);
+                }
+            }
+            Err(e) => eprintln!("Metadata error en {}: {}", path.display(), e),
+        }
+    }
+
+    let size_groups: Vec<Vec<PathBuf>> = by_size.into_values().filter(|v| v.len() > 1).collect();
+    let candidate_count: usize = size_groups.iter().map(|v| v.len()).sum();
+
+    println!(
+        "Candidatos (mismo tamano): {} archivos en {} grupos",
+        candidate_count,
+        size_groups.len()
+    );
+
+    // Segunda pasada: hashear solo los candidatos.
+    let mut by_hash: HashMap<String, Vec<PathBuf>> = HashMap::new();
+    let mut hash_errors = 0usize;
+
+    for group in size_groups {
+        for path in group {
+            match hash_file(&path) {
+                Ok(hash) => {
+                    by_hash.entry(hash).or_default().push(path);
+                }
+                Err(e) => {
+                    eprintln!("Error al hashear {}: {}", path.display(), e);
+                    hash_errors += 1;
+                }
+            }
+        }
+    }
+
+    if hash_errors > 0 {
+        eprintln!("\nArchivos no procesados por error: {}", hash_errors);
+    }
+
+    let mut duplicates: Vec<(String, Vec<PathBuf>)> = by_hash
+        .into_iter()
+        .filter(|(_, v)| v.len() > 1)
+        .collect();
+
+    // Ordenar por tamano descendente (los mas relevantes primero).
+    duplicates.sort_by(|(_, a), (_, b)| {
+        let size_a = fs::metadata(&a[0]).map(|m| m.len()).unwrap_or(0);
+        let size_b = fs::metadata(&b[0]).map(|m| m.len()).unwrap_or(0);
+        size_b.cmp(&size_a)
+    });
+
+    let elapsed = start.elapsed();
+
+    println!();
+
+    let mut output = String::new();
+
+    if duplicates.is_empty() {
+        let msg = "No se encontraron archivos duplicados.\n";
+        print!("{}", msg);
+        output.push_str(msg);
+    } else {
+        let line = format!("=== DUPLICADOS ({} grupos) ===\n\n", duplicates.len());
+        print!("{}", line);
+        output.push_str(&line);
+
+        let mut total_wasted: u64 = 0;
+
+        for (hash, paths) in &duplicates {
+            let size = fs::metadata(&paths[0]).map(|m| m.len()).unwrap_or(0);
+            let wasted = size * (paths.len() as u64 - 1);
+            total_wasted += wasted;
+
+            let line = format!(
+                "[{}] tamano: {} | {} copias | desperdicio: {}\n",
+                &hash[..12],
+                format_size(size),
+                paths.len(),
+                format_size(wasted)
+            );
+            print!("{}", line);
+            output.push_str(&line);
+
+            for p in paths {
+                let line = format!("    {}\n", p.display());
+                print!("{}", line);
+                output.push_str(&line);
+            }
+            output.push('\n');
+            println!();
+        }
+
+        let line = format!("Espacio desperdiciado total: {}\n", format_size(total_wasted));
+        print!("{}", line);
+        output.push_str(&line);
+    }
+
+    let line = format!("Tiempo: {:.2?}\n", elapsed);
+    print!("{}", line);
+    output.push_str(&line);
+
+    // Escribir el archivo.
+    match File::create(&output_path) {
+        Ok(mut f) => {
+            if let Err(e) = f.write_all(output.as_bytes()) {
+                eprintln!("Error al escribir {}: {}", output_path.display(), e);
+            } else {
+                println!("Resultado guardado en: {}", output_path.display());
+            }
+        }
+        Err(e) => eprintln!("No se pudo crear {}: {}", output_path.display(), e),
+    }
+
+    println!("Resultado guardado en: {}", output_path.display());
+
+    // Preguntar si se quiere hacer limpieza interactiva.
+    print!("\nDeseas revisar y eliminar duplicados ahora? (s/n): ");
+    std::io::stdout().flush().unwrap();
+    let mut resp = String::new();
+    std::io::stdin().read_line(&mut resp).unwrap();
+    if resp.trim().eq_ignore_ascii_case("s") {
+        interactive_cleanup(&output_path);
+    }
+
+}
+</file>
+
+<file path=".gitignore">
+/target
+</file>
+
+<file path="Cargo.toml">
+[package]
+name = "dup_finder"
+version = "0.1.0"
+edition = "2021"
+
+[[bin]]
+name = "dup_finder"
+path = "src/main.rs"
+
+[dependencies]
+sha2 = "0.10"
+
+[profile.release]
+opt-level = 3
+strip = true
+</file>
+
+</files>
